@@ -1,11 +1,10 @@
 import { qdlDevice } from '@commaai/qdl'
 import { usbClass } from '@commaai/qdl/usblib'
-import * as Comlink from 'comlink'
 
 import { getManifest } from './manifest'
 import { createSteps, withProgress } from './progress'
 
-export const Step = {
+export const StepCode = {
   INITIALIZING: 0,
   READY: 1,
   CONNECTING: 2,
@@ -16,7 +15,7 @@ export const Step = {
   DONE: 7,
 }
 
-export const Error = {
+export const ErrorCode = {
   UNKNOWN: -1,
   NONE: 0,
   REQUIREMENTS_NOT_MET: 1,
@@ -37,7 +36,7 @@ export function checkCompatibleDevice(storageInfo) {
   // Should be the same for all comma 3/3X
   if (storageInfo.block_size !== 4096 || storageInfo.page_size !== 4096 ||
     storageInfo.num_physical !== 6 || storageInfo.mem_type !== 'UFS') {
-    throw 'UFS chip parameters mismatch'
+    throw new Error('UFS chip parameters mismatch')
   }
 
   // comma three
@@ -48,6 +47,10 @@ export function checkCompatibleDevice(storageInfo) {
   }
   if (storageInfo.prod_name === 'H28U74301AMR' && storageInfo.manufacturer_id === 429 &&
     storageInfo.total_blocks === 14145536) {
+    return 'userdata_30'
+  }
+  if (/64GB-UFS-MT( +)8QSP/.test(storageInfo.prod_name) && storageInfo.manufacturer_id === 300 &&
+    storageInfo.total_blocks === 14143488) {
     return 'userdata_30'
   }
 
@@ -63,7 +66,7 @@ export function checkCompatibleDevice(storageInfo) {
     return 'userdata_90'
   }
 
-  throw 'Could not identify UFS chip'
+  throw new Error('Could not identify UFS chip')
 }
 
 /**
@@ -96,11 +99,12 @@ export class FlashManager {
     this.manifestUrl = manifestUrl
     this.callbacks = callbacks
     this.device = new qdlDevice(programmer)
-    this.imageWorker = null
+    /** @type {import('./image').ImageManager|null} */
+    this.imageManager = null
     /** @type {ManifestImage[]|null} */
     this.manifest = null
-    this.step = Step.INITIALIZING
-    this.error = Error.NONE
+    this.step = StepCode.INITIALIZING
+    this.error = ErrorCode.NONE
   }
 
   /** @param {number} step */
@@ -126,7 +130,7 @@ export class FlashManager {
     this.callbacks.onErrorChange?.(error)
     this.#setProgress(-1)
 
-    if (error !== Error.NONE) {
+    if (error !== ErrorCode.NONE) {
       console.debug('[Flash] error', error)
     }
   }
@@ -145,25 +149,25 @@ export class FlashManager {
   #checkRequirements() {
     if (typeof navigator.usb === 'undefined') {
       console.error('[Flash] WebUSB not supported')
-      this.#setError(Error.REQUIREMENTS_NOT_MET)
+      this.#setError(ErrorCode.REQUIREMENTS_NOT_MET)
       return false
     }
     if (typeof Worker === 'undefined') {
       console.error('[Flash] Web Workers not supported')
-      this.#setError(Error.REQUIREMENTS_NOT_MET)
+      this.#setError(ErrorCode.REQUIREMENTS_NOT_MET)
       return false
     }
     if (typeof Storage === 'undefined') {
       console.error('[Flash] Storage API not supported')
-      this.#setError(Error.REQUIREMENTS_NOT_MET)
+      this.#setError(ErrorCode.REQUIREMENTS_NOT_MET)
       return false
     }
     return true
   }
 
-  /** @param {ImageWorker} imageWorker */
-  async initialize(imageWorker) {
-    this.imageWorker = imageWorker
+  /** @param {import('./image').ImageManager} imageManager */
+  async initialize(imageManager) {
+    this.imageManager = imageManager
     this.#setProgress(-1)
     this.#setMessage('')
 
@@ -172,15 +176,15 @@ export class FlashManager {
     }
 
     try {
-      await this.imageWorker.init()
+      await this.imageManager.init()
     } catch (err) {
       console.error('[Flash] Failed to initialize image worker')
       console.error(err)
       if (err instanceof String && err.startsWith('Not enough storage')) {
-        this.#setError(Error.STORAGE_SPACE)
+        this.#setError(ErrorCode.STORAGE_SPACE)
         this.#setMessage(err)
       } else {
-        this.#setError(Error.UNKNOWN)
+        this.#setError(ErrorCode.UNKNOWN)
       }
       return
     }
@@ -189,22 +193,22 @@ export class FlashManager {
       try {
         this.manifest = await getManifest(this.manifestUrl)
         if (this.manifest.length === 0) {
-          throw 'Manifest is empty'
+          throw new Error('Manifest is empty')
         }
       } catch (err) {
         console.error('[Flash] Failed to fetch manifest')
         console.error(err)
-        this.#setError(Error.UNKNOWN)
+        this.#setError(ErrorCode.UNKNOWN)
         return
       }
       console.info('[Flash] Loaded manifest', this.manifest)
     }
 
-    this.#setStep(Step.READY)
+    this.#setStep(StepCode.READY)
   }
 
   async #connect() {
-    this.#setStep(Step.CONNECTING)
+    this.#setStep(StepCode.CONNECTING)
     this.#setProgress(-1)
 
     let usb
@@ -212,7 +216,7 @@ export class FlashManager {
       usb = new usbClass()
     } catch (err) {
       console.error('[Flash] Connection lost', err)
-      this.#setStep(Step.READY)
+      this.#setStep(StepCode.READY)
       this.#setConnected(false)
       return
     }
@@ -221,7 +225,7 @@ export class FlashManager {
       await this.device.connect(usb)
     } catch (err) {
       console.error('[Flash] Connection error', err)
-      this.#setError(Error.LOST_CONNECTION)
+      this.#setError(ErrorCode.LOST_CONNECTION)
       this.#setConnected(false)
       return
     }
@@ -234,7 +238,7 @@ export class FlashManager {
       storageInfo = await this.device.getStorageInfo()
     } catch (err) {
       console.error('[Flash] Connection lost', err)
-      this.#setError(Error.LOST_CONNECTION)
+      this.#setError(ErrorCode.LOST_CONNECTION)
       this.#setConnected(false)
       return
     }
@@ -244,7 +248,7 @@ export class FlashManager {
     } catch (e) {
       console.error('[Flash] Could not identify device:', e)
       console.error(storageInfo)
-      this.#setError(Error.UNRECOGNIZED_DEVICE)
+      this.#setError(ErrorCode.UNRECOGNIZED_DEVICE)
       return
     }
 
@@ -254,14 +258,14 @@ export class FlashManager {
   }
 
   async #repairPartitionTables() {
-    this.#setStep(Step.REPAIR_PARTITION_TABLES)
+    this.#setStep(StepCode.REPAIR_PARTITION_TABLES)
     this.#setProgress(0)
 
     // TODO: check that we have an image for each LUN (storageInfo.num_physical)
     const gptImages = this.manifest.filter((image) => !!image.gpt)
     if (gptImages.length === 0) {
       console.error('[Flash] No GPT images found')
-      this.#setError(Error.REPAIR_PARTITION_TABLES_FAILED)
+      this.#setError(ErrorCode.REPAIR_PARTITION_TABLES_FAILED)
       return
     }
 
@@ -271,24 +275,24 @@ export class FlashManager {
         const [onDownload, onRepair] = createSteps([2, 1], onProgress)
 
         // Download GPT image
-        await this.imageWorker.downloadImage(image, Comlink.proxy(onDownload))
-        const blob = await this.imageWorker.getImage(image);
+        await this.imageManager.downloadImage(image, onDownload)
+        const blob = await this.imageManager.getImage(image);
 
         // Recreate main and backup GPT for this LUN
         if (!await this.device.repairGpt(image.gpt.lun, blob)) {
-          throw `Repairing LUN ${image.gpt.lun} failed`
+          throw new Error(`Repairing LUN ${image.gpt.lun} failed`)
         }
         onRepair(1.0)
       }
     } catch (err) {
       console.error('[Flash] An error occurred while repairing partition tables')
       console.error(err)
-      this.#setError(Error.REPAIR_PARTITION_TABLES_FAILED)
+      this.#setError(ErrorCode.REPAIR_PARTITION_TABLES_FAILED)
     }
   }
 
   async #eraseDevice() {
-    this.#setStep(Step.ERASE_DEVICE)
+    this.#setStep(StepCode.ERASE_DEVICE)
     this.#setProgress(-1)
 
     // TODO: use storageInfo.num_physical
@@ -297,12 +301,12 @@ export class FlashManager {
     const [found, persistLun, partition] = await this.device.detectPartition('persist')
     if (!found || luns.indexOf(persistLun) < 0) {
       console.error('[Flash] Could not find "persist" partition', { found, persistLun, partition })
-      this.#setError(Error.ERASE_FAILED)
+      this.#setError(ErrorCode.ERASE_FAILED)
       return
     }
     if (persistLun !== 0 || partition.start !== 8n || partition.sectors !== 8192n) {
       console.error('[Flash] Partition "persist" does not have expected properties', { found, persistLun, partition })
-      this.#setError(Error.ERASE_FAILED)
+      this.#setError(ErrorCode.ERASE_FAILED)
       return
     }
     console.info(`[Flash] "persist" partition located in LUN ${persistLun}`)
@@ -315,18 +319,18 @@ export class FlashManager {
         if (lun === persistLun) preserve.push('persist')
         console.info(`[Flash] Erasing LUN ${lun} while preserving ${preserve.map((part) => `"${part}"`).join(', ')} partitions`)
         if (!await this.device.eraseLun(lun, preserve)) {
-          throw `Erasing LUN ${lun} failed`
+          throw new Error(`Erasing LUN ${lun} failed`)
         }
       }
     } catch (err) {
       console.error('[Flash] An error occurred while erasing device')
       console.error(err)
-      this.#setError(Error.ERASE_FAILED)
+      this.#setError(ErrorCode.ERASE_FAILED)
     }
   }
 
   async #flashSystem() {
-    this.#setStep(Step.FLASH_SYSTEM)
+    this.#setStep(StepCode.FLASH_SYSTEM)
     this.#setProgress(0)
 
     // Exclude GPT images and persist image, and pick correct userdata image to flash
@@ -336,7 +340,7 @@ export class FlashManager {
 
     if (!systemImages.find((image) => image.name === this.#userdataImage)) {
       console.error(`[Flash] Did not find userdata image "${this.#userdataImage}"`)
-      this.#setError(Error.UNKNOWN)
+      this.#setError(ErrorCode.UNKNOWN)
       return
     }
 
@@ -345,8 +349,8 @@ export class FlashManager {
         const [onDownload, onFlash] = createSteps([1, image.hasAB ? 2 : 1], this.#setProgress.bind(this))
 
         this.#setMessage(`Downloading ${image.name}`)
-        await this.imageWorker.downloadImage(image, Comlink.proxy(onDownload))
-        const blob = await this.imageWorker.getImage(image)
+        await this.imageManager.downloadImage(image, onDownload)
+        const blob = await this.imageManager.getImage(image)
         onDownload(1.0)
 
         // Flash image to each slot
@@ -356,8 +360,8 @@ export class FlashManager {
           const partitionName = `${image.name.startsWith('userdata_') ? 'userdata' : image.name}${slot}`
 
           this.#setMessage(`Flashing ${partitionName}`)
-          if (!await this.device.flashBlob(partitionName, blob, (progress) => onSlotProgress(progress / image.size))) {
-            throw `Flashing partition "${partitionName}" failed`
+          if (!await this.device.flashBlob(partitionName, blob, (progress) => onSlotProgress(progress / image.size), false)) {
+            throw new Error(`Flashing partition "${partitionName}" failed`)
           }
           onSlotProgress(1.0)
         }
@@ -365,19 +369,19 @@ export class FlashManager {
     } catch (err) {
       console.error('[Flash] An error occurred while flashing system')
       console.error(err)
-      this.#setError(Error.FLASH_SYSTEM_FAILED)
+      this.#setError(ErrorCode.FLASH_SYSTEM_FAILED)
     }
   }
 
   async #finalize() {
-    this.#setStep(Step.FINALIZING)
+    this.#setStep(StepCode.FINALIZING)
     this.#setProgress(-1)
     this.#setMessage('Finalizing...')
 
     // Set bootable LUN and update active partitions
     if (!await this.device.setActiveSlot('a')) {
       console.error('[Flash] Failed to update slot')
-      this.#setError(Error.FINALIZING_FAILED)
+      this.#setError(ErrorCode.FINALIZING_FAILED)
     }
 
     // Reboot the device
@@ -385,25 +389,25 @@ export class FlashManager {
     await this.device.reset()
     this.#setConnected(false)
 
-    this.#setStep(Step.DONE)
+    this.#setStep(StepCode.DONE)
   }
 
   async start() {
-    if (this.step !== Step.READY) return
+    if (this.step !== StepCode.READY) return
     await this.#connect()
-    if (this.error !== Error.NONE) return
+    if (this.error !== ErrorCode.NONE) return
     let start = performance.now()
     await this.#repairPartitionTables()
     console.info(`Repaired partition tables in ${((performance.now() - start) / 1000).toFixed(2)}s`)
-    if (this.error !== Error.NONE) return
+    if (this.error !== ErrorCode.NONE) return
     start = performance.now()
     await this.#eraseDevice()
     console.info(`Erased device in ${((performance.now() - start) / 1000).toFixed(2)}s`)
-    if (this.error !== Error.NONE) return
+    if (this.error !== ErrorCode.NONE) return
     start = performance.now()
     await this.#flashSystem()
     console.info(`Flashed system in ${((performance.now() - start) / 1000).toFixed(2)}s`)
-    if (this.error !== Error.NONE) return
+    if (this.error !== ErrorCode.NONE) return
     start = performance.now()
     await this.#finalize()
     console.info(`Finalized in ${((performance.now() - start) / 1000).toFixed(2)}s`)

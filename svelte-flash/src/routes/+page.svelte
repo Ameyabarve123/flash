@@ -6,6 +6,8 @@
   import zadigCreateNewDevice from '../lib/assets/zadig_create_new_device.png';
   import zadigForm from '../lib/assets/zadig_form.png';
 
+  import { Flash } from '$lib'
+
   const VENDOR_ID = '05C6';
   const PRODUCT_ID = '9008';
   const DETACH_SCRIPT = 'for d in /sys/bus/usb/drivers/qcserial/*-*; do [ -e "$d" ] && echo -n "$(basename $d)" | sudo tee /sys/bus/usb/drivers/qcserial/unbind > /dev/null; done';
@@ -64,6 +66,7 @@
       document.documentElement.style.setProperty('--right-panel-width', `${100 - leftWidth}%`);
     }
   }
+
 </script>
 
 <svelte:head>
@@ -137,8 +140,7 @@
         <li>Second, connect power to the <strong>upper</strong> <span class="whitespace-nowrap">OBD-C</span> port <strong>(port 2)</strong>.</li>
       </ol>
       
-      <img src={qdlPorts} alt="image showing comma three and two ports. the lower port is labeled 1. the upper port is labeled 2." width="450" height="300" />
-      
+      <img src={qdlPorts} alt="comma three device with two ports - lower port labeled 1, upper port labeled 2" width="450" height="300" />
       <p>Your device's screen will remain blank for the entire flashing process. This is normal.</p>
       
       {#if isLinux}
@@ -206,16 +208,15 @@
   </main>
 
   <!-- Resizable divider -->
-  <div 
+  <button 
     class="resize-handle"
     class:resizing={isResizing}
     on:mousedown={handleMouseDown}
-    role="separator"
     aria-label="Resize panels"
     title="Drag to resize panels"
   >
     <div class="resize-handle-line"></div>
-  </div>
+  </button>
 
   <!-- Flash Component -->
   <div class="flash-panel bg-gray-100 dark:bg-gray-800">
